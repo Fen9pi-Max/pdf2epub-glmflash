@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Shortcut: epub <pdf-file> [extra args...]
+# Example: epub ~/Downloads/book.pdf --auto-toc --title "My Book"
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+if [ -x "$SCRIPT_DIR/.venv/bin/python" ]; then
+    exec "$SCRIPT_DIR/.venv/bin/python" "$SCRIPT_DIR/pdf2epub_glmflash.py" "$@"
+else
+    exec python3 "$SCRIPT_DIR/pdf2epub_glmflash.py" "$@"
+fi

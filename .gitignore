@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual Environment
+.venv/
+venv/
+env/
+
+# Mac OS
+.DS_Store
+
+# IDEs
+.vscode/
+.idea/
+
+# Project Specific: per-book work dirs (checkpoints, images, results)
+glmflash_work_*/
+*.epub
+output/
+*.pdf
+.env
