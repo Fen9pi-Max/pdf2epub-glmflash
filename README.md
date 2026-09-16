@@ -1,34 +1,34 @@
 # pdf2epub-glmflash
 
-[English](README.md) | [中文](README_zh.md)
+[English](README_en.md) | [中文](README.md)
 
-Convert scanned PDF books into clean, readable EPUB ebooks with the **GLM-5.3-Flash** vision model. Every page is rendered to an image, transcribed to faithful Markdown (code blocks, tables, and lists preserved), and reassembled into a chapter-split EPUB with figures cropped from the original PDF and embedded at their exact positions.
+使用 **GLM-5.3-Flash** 视觉模型把扫描版 PDF 书籍转换为清晰、易读的 EPUB 电子书。每页渲染成图后逐字转录为忠实的 Markdown（代码块、表格、列表全部保留），再重新组装为按章节切分的 EPUB——插图从原 PDF 裁剪并嵌入原位置。
 
-> **⚠️ Intended use — personal learning only.** This is a *format-shifting* tool: use it on PDFs **you legitimately own** (purchased e-books, lecture notes, papers, technical documentation) so you can read them comfortably on an e-reader. It does not provide, host, or distribute any book content. Do not use it to produce or share pirated copies, and respect the copyright laws of your jurisdiction. Converted files are for your personal reading only.
+> **⚠️ 使用声明 —— 仅供个人学习。** 本项目是一个**格式转存**工具：请仅用于转换**你合法拥有**的 PDF 资料（正版购入的电子书、课程讲义、论文、技术文档等），方便在阅读器上学习阅读。本项目不提供、不存储、不传播任何书籍资源本身；转换产物请勿分发，勿用于盗版传播，并请遵守所在国家/地区的版权法律法规。
 
-## Features
+## 功能特性
 
-- **Vision transcription by GLM-5.3-Flash**: faithful per-page Markdown with heading levels, fenced code blocks, tables, and lists. Running headers, page numbers, and scan watermarks are dropped automatically.
-- **Colored text carried over**: sentences printed in a clearly different ink color (e.g. blue emphasis lines) are detected and re-emitted with inline CSS colors in the EPUB (`==[蓝]…==` markers → `<span style="color:…">`).
-- **Figures preserved and positioned**: illustration regions are detected per page, cropped from the PDF at 300 dpi, and embedded exactly where they appear in the book. Coverage is reported (`markers replaced / total`).
-- **Layout awareness**: two-column pages and 2-up spread scans (one PDF page = two book pages) are handled with explicit reading-order rules.
-- **Smart chapter splitting**: a dual-tier TOC engine parses the printed table of contents (many page-number formats supported) and falls back to body-heading scanning with noise suppression. An interactive review step lets you confirm chapters before generation.
-- **Resumable by design**: per-page transcription checkpoints — interrupted runs (including API quota windows) resume exactly where they stopped.
-- **CJK-aware output**: Chinese paragraph joining without stray spaces, language auto-detection (`--language` to override), CJK chapter-title recognition (第N章 / 第N部分 / HACK #N / 术语表 …).
-- **Valid XHTML output**: stray `<` escaping, code-fence balancing, and image-render fallback keep every generated EPUB strictly parseable.
+- **GLM-5.3-Flash 视觉转录**：逐页转录为 Markdown，保留标题层级、围栏代码块、表格和列表；自动丢弃页眉、页码和扫描水印（如 www.TopSage.com、Anna's Archive 生成页）。
+- **颜色同步**：原书中以明显不同颜色印刷的文字（如蓝色强调句）会被识别，并在 EPUB 中以内联 CSS 颜色还原（`==[蓝]…==` 标记 → `<span style="color:…">`）。
+- **图片不丢、位置正确**：逐页检测插图区域，从 PDF 以 300 dpi 裁剪，嵌入其在书中的精确位置；结束时输出覆盖率报告。
+- **版式适应**：双栏排版与 2-up 双联页扫描（一个 PDF 页 = 两个书页）都有明确的阅读顺序规则。
+- **智能章节分割**：双层目录引擎——优先解析印刷目录（支持 `…… 12`、`/ 12`、`· 12` 等多种页码格式），回退到正文标题扫描（带噪声抑制）；交互式确认后再生成。
+- **断点续传**：按页保存转录检查点，中断（包括 API 配额窗口）后重跑自动续传。
+- **中文友好**：中文段落拼接不引入多余空格；语言自动检测（可用 `--language` 覆盖）；识别 第N章 / 第N部分 / HACK #N / 术语表 等中文标题。
+- **XHTML 严格合法**：裸 `<` 转义、代码围栏平衡、图片渲染兜底，生成的 EPUB 全部可解析。
 
-## Prerequisites
+## 前置要求
 
 - Python 3.8+
-- A GLM API key (e.g. from a GLM coding plan)
+- GLM API Key（如 GLM Coding Plan）
 
-## Getting API Access
+## 获取 API 访问
 
-Set `GLM_API_KEY` in `.env`, or let the tool discover a key automatically from the local ZCode config (`~/.zcode/v2/config.json` — the coding-plan provider is preferred, then any Anthropic-compatible provider with a key). Optional overrides: `GLM_BASE_URL` (default `https://open.bigmodel.cn/api/anthropic`), `GLM_MODEL` (default `GLM-5.3-Flash`).
+在 `.env` 中设置 `GLM_API_KEY`；留空时自动从本机 ZCode 配置发现密钥（`~/.zcode/v2/config.json`，优先 coding-plan 提供商，其次任何带密钥的 Anthropic 兼容提供商）。可选：`GLM_BASE_URL`（默认 `https://open.bigmodel.cn/api/anthropic`）、`GLM_MODEL`（默认 `GLM-5.3-Flash`）。
 
-> This is an independent open-source project, not affiliated with or endorsed by Zhipu AI / Z.ai. You need your own GLM API access.
+> 本项目为独立开源项目，与智谱 AI / Z.ai 无隶属或合作关系；使用需自备 GLM API 权限。
 
-## Installation
+## 安装
 
 ```bash
 git clone <this-repo> pdf2epub-glmflash
@@ -36,57 +36,57 @@ cd pdf2epub-glmflash
 python3 -m venv .venv
 .venv/bin/pip install requests pymupdf EbookLib python-dotenv markdown
 
-cp .env.example .env   # edit if you need to set a key explicitly
+cp .env.example .env   # 如需显式设置密钥则编辑
 ```
 
-(`uv` works too: `uv run pdf2epub_glmflash.py ...`)
+（也可用 `uv run pdf2epub_glmflash.py ...`）
 
-## Usage
+## 使用
 
 ```bash
 .venv/bin/python pdf2epub_glmflash.py /path/to/book.pdf
 
-# Skip the interactive prompts
-.venv/bin/python pdf2epub_glmflash.py --title "Book Title" --author "Author" --auto-toc book.pdf
+# 跳过交互提示
+.venv/bin/python pdf2epub_glmflash.py --title "书名" --author "作者" --auto-toc book.pdf
 
-# Single-chapter EPUB (no TOC splitting)
+# 单章节 EPUB（不拆分章节）
 .venv/bin/python pdf2epub_glmflash.py --no-toc -o out.epub book.pdf
 
-# Test or retry a page range (checkpoints make this cheap)
+# 只处理部分页面（测试/重试，断点保证开销极小）
 .venv/bin/python pdf2epub_glmflash.py --pages 1:60 --auto-toc book.pdf
 
-# Tuning
+# 调优
 .venv/bin/python pdf2epub_glmflash.py --dpi 200 --concurrency 6 --glm-max-tokens 16000 book.pdf
 ```
 
-### CLI Options
+### 命令行参数
 
-| Option | Meaning |
+| 参数 | 含义 |
 | --- | --- |
-| `--title` / `--author` | Metadata; skips the interactive prompt |
-| `--output`, `-o` | Output EPUB path (default: `<input>.epub`) |
-| `--auto-toc` | Use auto-detected chapters without review |
-| `--no-toc` | Single-chapter EPUB (mutually exclusive with `--auto-toc`) |
-| `--pages A:B` | Transcribe only this 1-based inclusive range |
-| `--language` | EPUB language code (default: auto-detect, e.g. `zh`) |
-| `--glm-model` / `--glm-url` / `--glm-max-tokens` | API overrides |
-| `--dpi` / `--concurrency` | Rendering DPI and parallel transcriptions |
+| `--title` / `--author` | 元数据；跳过交互提示 |
+| `--output`, `-o` | 输出 EPUB 路径（默认 `<输入名>.epub`） |
+| `--auto-toc` | 使用自动检测的章节，跳过确认 |
+| `--no-toc` | 单章节 EPUB（与 `--auto-toc` 互斥） |
+| `--pages A:B` | 只转录该 1 起始闭区间页码范围 |
+| `--language` | EPUB 语言代码（默认自动检测，如 `zh`） |
+| `--glm-model` / `--glm-url` / `--glm-max-tokens` | API 覆盖项 |
+| `--dpi` / `--concurrency` | 渲染 DPI 与并发转录数 |
 
-### Environment Variables
+### 环境变量
 
-`GLM_API_KEY`, `GLM_BASE_URL`, `GLM_MODEL`, `GLM_DPI`, `GLM_CONCURRENCY`, `GLM_MAX_TOKENS` (16000), `GLM_THINKING` (default `disabled` — OCR needs no deep reasoning; ~5x faster, identical quality).
+`GLM_API_KEY`、`GLM_BASE_URL`、`GLM_MODEL`、`GLM_DPI`、`GLM_CONCURRENCY`、`GLM_MAX_TOKENS`（16000）、`GLM_THINKING`（默认 `disabled`——OCR 无需深度推理，约 5 倍速且质量不变）。
 
-### Global Command
+### 全局命令
 
 ```bash
 sudo ln -s "$(pwd)/epub" /usr/local/bin/epub
 epub /path/to/book.pdf
 ```
 
-### Work Directory & Resume
+### 工作目录与续传
 
-Each input gets `glmflash_work_<hash>/` holding `glm_pages/` (per-page Markdown checkpoints), `glm_images/` (rendered page PNGs, useful for proofreading), `glm_figures/` (figure-detection results), `images/` (cropped figures), `results.json` (assembled output), and `cover.png`. Re-running the same file resumes automatically; with `--pages A:B` the assembled file is `results_pA_pB.json` so partial runs are never mistaken for complete ones.
+每个输入对应 `glmflash_work_<hash>/`：`glm_pages/`（逐页 Markdown 检查点）、`glm_images/`（渲染页 PNG，可用于校对）、`glm_figures/`（插图检测结果）、`images/`（裁剪插图）、`results.json`（组装结果）、`cover.png`。重跑同一文件自动续传；`--pages A:B` 时组装文件为 `results_pA_pB.json`，避免部分运行被误认为完整结果。
 
-## License
+## 开源协议
 
 [MIT License](LICENSE)

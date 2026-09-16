@@ -46,7 +46,7 @@ Per-input work dir `glmflash_work_<8-char-md5-of-name+size>/` holds `glm_pages/p
 - Console output uses `[*]` info / `[+]` success / `[!]` warning / `[-]` step prefixes via plain `print` — no logging framework.
 - The GLM transcription prompt (`GLM_PAGE_PROMPT`) is the single source of transcription-format truth (heading levels, code fences, watermark/header dropping, reading order for 2-up/two-column layouts, colored-text markers `==[色]…==`, blank-page marker). Downstream TOC/EPUB code depends on it — change them together. `GLM_FIGURE_PROMPT` must keep returning normalized 0-1000 bboxes as JSON.
 - **EPUB HTML hygiene**: chapter markdown goes through `sanitize_markdown_for_xhtml` (escape stray `<` outside code — python-markdown otherwise passes text like `<main+0x5b>` through as raw HTML and produces invalid XHTML), then `render_color_spans` (`==[色]text==` → inline-styled `<span>`, must run AFTER sanitize or the spans get escaped), then `force_render_images` after conversion (python-markdown's raw-HTML block parser can leave `![alt](src)` unrendered on adversarial code content — always re-check rendered `<img>` counts against `images` maps after generation).
-- READMEs are bilingual: update **both** `README.md` and `README_zh.md` when documenting user-facing changes.
+- READMEs are bilingual: `README.md` is Chinese (repo default) and `README_en.md` is English — update **both** when documenting user-facing changes.
 - Commit style: conventional commits with scope, e.g. `fix(toc): ...`, `feat: ...`.
 
 ## Gotchas
