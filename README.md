@@ -4,6 +4,8 @@
 
 Convert scanned PDF books into clean, readable EPUB ebooks with the **GLM-5.3-Flash** vision model. Every page is rendered to an image, transcribed to faithful Markdown (code blocks, tables, and lists preserved), and reassembled into a chapter-split EPUB with figures cropped from the original PDF and embedded at their exact positions.
 
+> **⚠️ Intended use — personal learning only.** This is a *format-shifting* tool: use it on PDFs **you legitimately own** (purchased e-books, lecture notes, papers, technical documentation) so you can read them comfortably on an e-reader. It does not provide, host, or distribute any book content. Do not use it to produce or share pirated copies, and respect the copyright laws of your jurisdiction. Converted files are for your personal reading only.
+
 ## Features
 
 - **Vision transcription by GLM-5.3-Flash**: faithful per-page Markdown with heading levels, fenced code blocks, tables, and lists. Running headers, page numbers, and scan watermarks are dropped automatically.
@@ -23,6 +25,8 @@ Convert scanned PDF books into clean, readable EPUB ebooks with the **GLM-5.3-Fl
 ## Getting API Access
 
 Set `GLM_API_KEY` in `.env`, or let the tool discover a key automatically from the local ZCode config (`~/.zcode/v2/config.json` — the coding-plan provider is preferred, then any Anthropic-compatible provider with a key). Optional overrides: `GLM_BASE_URL` (default `https://open.bigmodel.cn/api/anthropic`), `GLM_MODEL` (default `GLM-5.3-Flash`).
+
+> This is an independent open-source project, not affiliated with or endorsed by Zhipu AI / Z.ai. You need your own GLM API access.
 
 ## Installation
 

@@ -59,4 +59,4 @@ Per-input work dir `glmflash_work_<8-char-md5-of-name+size>/` holds `glm_pages/p
 - Book scans from ebook-ripper sites carry per-page watermarks (`www.TopSage.com`) and pirate-archive generator pages (Anna's Archive) — dropped by prompt rule and `postprocess_glm_markdown` (banner-page detection matches the phrase, so real names like "Anna" in acknowledgements survive); keep prompt and postprocessor in sync.
 - GLM sometimes emits `<br>` inside table cells; `sanitize_markdown_for_xhtml` replaces it outside code fences (inside code it is real content). A few may survive inside backtick-wrapped table cells — cosmetic only.
 - Always verify book metadata against the transcribed CIP/版权页 rather than guessing from cover or praise pages (author attribution has been wrong there before).
-- Converted books so far live in `/Users/huifeng/Code/ebook/books/` (PDFs + EPUBs); their work dirs were migrated from the paddle project into `glmflash_work_*` here.
+- Converted books live outside the repo (a local `books/` directory); their `glmflash_work_*` checkpoints stay here but are gitignored.
