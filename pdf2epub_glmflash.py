@@ -104,7 +104,8 @@ GLM_PAGE_PROMPT = """你是专业的图书数字化录入员。请将这张书�
 9. 加框的提示/注意事项（TIP/注意/NOTE 等）用 Markdown 引用块（> ）转录。
 10. 插图、照片、图表在其位置输出一行「[插图：简要描述内容]」，原有图注文字正常转录。
 11. 若整页空白或仅有装饰，只输出「<!-- blank page -->」。
-12. 直接以正文内容开头，不要输出任何解释、评论或与转录无关的内容。"""
+12. 直接以正文内容开头，不要输出任何解释、评论或与转录无关的内容。
+13. 颜色同步：正文中以明显不同颜色印刷的文字（整句或短语，如蓝色/青色/红色的强调句），用「==[色]文字==」包裹，色为下列颜色名之一：蓝/青/绿/红/橙/紫/粉/棕/黄/灰（如「==[蓝]这句话是蓝色的==」）。仅当颜色与正文墨色差异明显时才标记，不要猜测；加粗、斜体不在此列，仍用 Markdown 语法；代码块内不要使用。"""
 
 
 GLM_FIGURE_PROMPT = """找出这张书籍页面中的所有插图区域（流程图、示意图、原理图、照片、屏幕截图、带边框的图表、思维导图、手写签名、印章/题字），并输出它们的位置。
@@ -1477,6 +1478,57 @@ def force_render_images(html_text: str) -> str:
     return LITERAL_IMG_MD_RE.sub(_repl, html_text)
 
 
+# Ink colors worth carrying over from the printed page (name as emitted by the
+# model in ==[色]…== markers → inline CSS for the EPUB).
+COLOR_NAME_TO_HEX = {
+    "蓝": "#1a7abf",
+    "青": "#00a0bd",
+    "绿": "#1f9d55",
+    "红": "#d64541",
+    "橙": "#e07b1f",
+    "紫": "#8e44ad",
+    "粉": "#e05c8a",
+    "棕": "#8d6e63",
+    "黄": "#a67c00",
+    "灰": "#7a7a7a",
+}
+COLOR_SPAN_RE = re.compile(r"==\[([^\[\]\n]{1,4})\](.+?)==")
+
+
+def render_color_spans(lines: List[str]) -> List[str]:
+    """Converts ==[色]text== colored-text markers into inline <span> elements.
+    Applied after sanitize_markdown_for_xhtml and before markdown conversion;
+    fenced code blocks are left untouched (== there is literal content)."""
+
+    def _repl(m: "re.Match") -> str:
+        name = m.group(1).strip()
+        hex_color = ""
+        for key, value in COLOR_NAME_TO_HEX.items():
+            if key in name:
+                hex_color = value
+                break
+        text = m.group(2)
+        if hex_color:
+            return f'<span style="color:{hex_color}">{text}</span>'
+        return text  # unrecognized color word: keep the text, drop the marker
+
+    out = []
+    in_code = False
+    for line in lines:
+        if line.strip().startswith("```"):
+            in_code = not in_code
+            out.append(line)
+            continue
+        if in_code or "<!--" in line:
+            out.append(line)
+            continue
+        if "==" in line:
+            out.append(COLOR_SPAN_RE.sub(_repl, line))
+        else:
+            out.append(line)
+    return out
+
+
 def balance_code_fences(md: str) -> str:
     """Appends a closing fence when a page's markdown ends inside a code
     block, so the unclosed fence cannot swallow following pages' content."""
@@ -1770,7 +1822,9 @@ def create_epub(
                     html_content = force_render_images(
                         markdown.markdown(
                             "\n".join(
-                                sanitize_markdown_for_xhtml(current_chapter_content)
+                                render_color_spans(
+                                    sanitize_markdown_for_xhtml(current_chapter_content)
+                                )
                             ),
                             extensions=["fenced_code", "tables"],
                         )
@@ -1811,7 +1865,11 @@ def create_epub(
 
             html_content = force_render_images(
                 markdown.markdown(
-                    "\n".join(sanitize_markdown_for_xhtml(current_chapter_content)),
+                    "\n".join(
+                        render_color_spans(
+                            sanitize_markdown_for_xhtml(current_chapter_content)
+                        )
+                    ),
                     extensions=["fenced_code", "tables"],
                 )
             )
@@ -1830,7 +1888,11 @@ def create_epub(
 
             html_content = force_render_images(
                 markdown.markdown(
-                    "\n".join(sanitize_markdown_for_xhtml(full_markdown.split("\n"))),
+                    "\n".join(
+                        render_color_spans(
+                            sanitize_markdown_for_xhtml(full_markdown.split("\n"))
+                        )
+                    ),
                     extensions=["fenced_code", "tables"],
                 )
             )

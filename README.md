@@ -7,6 +7,7 @@ Convert scanned PDF books into clean, readable EPUB ebooks with the **GLM-5.3-Fl
 ## Features
 
 - **Vision transcription by GLM-5.3-Flash**: faithful per-page Markdown with heading levels, fenced code blocks, tables, and lists. Running headers, page numbers, and scan watermarks are dropped automatically.
+- **Colored text carried over**: sentences printed in a clearly different ink color (e.g. blue emphasis lines) are detected and re-emitted with inline CSS colors in the EPUB (`==[蓝]…==` markers → `<span style="color:…">`).
 - **Figures preserved and positioned**: illustration regions are detected per page, cropped from the PDF at 300 dpi, and embedded exactly where they appear in the book. Coverage is reported (`markers replaced / total`).
 - **Layout awareness**: two-column pages and 2-up spread scans (one PDF page = two book pages) are handled with explicit reading-order rules.
 - **Smart chapter splitting**: a dual-tier TOC engine parses the printed table of contents (many page-number formats supported) and falls back to body-heading scanning with noise suppression. An interactive review step lets you confirm chapters before generation.
