@@ -191,6 +191,9 @@ def postprocess_glm_markdown(md: str) -> str:
             continue
         if re.fullmatch(r"\d{1,4}", stripped):
             continue
+        # Lone roman numerals are front-matter page numbers (text-layer PDFs).
+        if re.fullmatch(r"[IVXLCivxlc]{1,5}", stripped):
+            continue
         if re.fullmatch(r"\d{1,4}\s*[▶▷▼▲◆●]", stripped):
             continue
         cleaned_lines.append(line)
@@ -709,6 +712,150 @@ def parse_pages_arg(pages_arg: Optional[str]) -> Tuple[int, Optional[int]]:
     if end < start:
         raise argparse.ArgumentTypeError("--pages END must be >= START")
     return start, end
+
+
+# --- Text-layer engine (born-digital PDFs: Word/LaTeX exports) ---
+
+TEXT_ENGINE_MIN_RATIO = 0.9  # pages with a text layer required for auto-select
+
+
+def detect_text_layer_ratio(doc: "fitz.Document", sample_limit: int = 60) -> float:
+    """Fraction of pages (sampled) that carry an extractable text layer."""
+    n = len(doc)
+    step = max(1, n // sample_limit)
+    total = 0
+    with_text = 0
+    for i in range(0, n, step):
+        total += 1
+        if len(doc[i].get_text().strip()) > 50:
+            with_text += 1
+    return with_text / total if total else 0.0
+
+
+def _join_heading_lines(lines: List[str]) -> str:
+    """Joins the lines of a wrapped heading; no space at CJK boundaries."""
+    out = ""
+    for seg in lines:
+        seg = seg.strip()
+        if not seg:
+            continue
+        if out and not (is_cjk_char(out[-1]) or is_cjk_char(seg[0])):
+            out += " "
+        out += seg
+    return out
+
+
+def extract_text_layer_page(
+    doc: "fitz.Document",
+    page_idx: int,
+    images_dir: str,
+    body_size: float,
+) -> Tuple[str, Dict[str, str]]:
+    """
+    Extracts one page of a born-digital PDF into markdown using the real text
+    layer (zero OCR error). Headings are inferred from font size relative to
+    the body size; embedded image blocks are saved losslessly and referenced
+    at their exact reading-order position.
+    """
+    d = doc[page_idx].get_text("dict")
+    md_parts = []
+    images_map: Dict[str, str] = {}
+    img_k = 0
+    for block in d["blocks"]:
+        if block["type"] == 1:  # image block: original bytes, lossless
+            img_k += 1
+            ext = (block.get("ext") or "png").lower()
+            ext = "jpg" if ext == "jpeg" else ext
+            rel_path = f"fig_p{page_idx + 1:04d}_{img_k}.{ext}"
+            out_path = os.path.join(images_dir, rel_path)
+            os.makedirs(images_dir, exist_ok=True)
+            with open(out_path, "wb") as f:
+                f.write(block["image"])
+            images_map[rel_path] = ""
+            md_parts.append(f"![插图]({rel_path})")
+            continue
+        block_lines = []
+        max_size = 0.0
+        for line in block.get("lines", []):
+            text = "".join(s["text"] for s in line.get("spans", []))
+            if text.strip():
+                block_lines.append(text)
+            for s in line.get("spans", []):
+                if s["text"].strip():
+                    max_size = max(max_size, s["size"])
+        if not block_lines:
+            continue
+        if max_size >= body_size + 6:
+            md_parts.append("# " + _join_heading_lines(block_lines))
+        elif max_size >= body_size + 2.5:
+            md_parts.append("## " + _join_heading_lines(block_lines))
+        else:
+            md_parts.append("\n".join(block_lines))
+    return "\n\n".join(md_parts), images_map
+
+
+def run_text_ocr(
+    pdf_path: str,
+    work_dir: str,
+    page_start: int = 1,
+    page_end: Optional[int] = None,
+) -> Optional[List[Dict]]:
+    """
+    Text-layer engine for born-digital PDFs: extraction is lossless and
+    instant (no API calls). Returns results in the same internal shape as the
+    GLM engine so the TOC/EPUB stages are reused unchanged.
+    """
+    doc = fitz.open(pdf_path)
+    total_pages = len(doc)
+    if page_end is None or page_end > total_pages:
+        page_end = total_pages
+    page_indices = list(range(page_start - 1, page_end))
+
+    # Body font size = the most common span size over sampled pages.
+    size_counts: Counter = Counter()
+    for i in range(0, total_pages, max(1, total_pages // 40)):
+        for block in doc[i].get_text("dict")["blocks"]:
+            if block["type"] != 0:
+                continue
+            for line in block.get("lines", []):
+                for s in line.get("spans", []):
+                    if s["text"].strip():
+                        size_counts[round(s["size"], 1)] += len(s["text"].strip())
+    if not size_counts:
+        print("[!] No extractable text found — use the GLM engine for scans.")
+        return None
+    body_size = size_counts.most_common(1)[0][0]
+    print(
+        f"[*] Text-layer engine: {len(page_indices)} page(s), body font "
+        f"{body_size}pt (headings at >= {body_size + 2.5:.1f}pt / {body_size + 6:.1f}pt)"
+    )
+
+    images_dir = os.path.join(work_dir, "images")
+    os.makedirs(images_dir, exist_ok=True)
+    results = []
+    for page_idx in page_indices:
+        md, page_images = extract_text_layer_page(
+            doc, page_idx, images_dir, body_size
+        )
+        md = postprocess_glm_markdown(md) or "<!-- blank page -->"
+        results.append(
+            {
+                "result": {
+                    "layoutParsingResults": [
+                        {"markdown": {"text": md, "images": page_images}}
+                    ]
+                }
+            }
+        )
+    n_imgs = sum(
+        len(r["result"]["layoutParsingResults"][0]["markdown"]["images"])
+        for r in results
+    )
+    print(
+        f"[+] Text-layer extraction complete: {len(results)} page(s), "
+        f"{n_imgs} embedded image(s)."
+    )
+    return results
 
 
 def extract_cover_image(pdf_path: str, output_path: str) -> Optional[str]:
@@ -1609,7 +1756,9 @@ def create_epub(
 
                     epub_img = epub.EpubImage()
                     epub_img.file_name = rel_path
-                    epub_img.media_type = "image/jpeg"
+                    epub_img.media_type = (
+                        "image/png" if rel_path.lower().endswith(".png") else "image/jpeg"
+                    )
                     epub_img.content = img_data
 
                     if rel_path not in [item.file_name for item in book.get_items()]:
@@ -1922,7 +2071,18 @@ def main():
     parser.add_argument(
         "--output", "-o", help="Path to output EPUB file (default: input_name.epub)"
     )
-    parser.add_argument("--title", help="Book title (skips interactive prompt)")
+    parser.add_argument(
+        "--engine",
+        choices=["auto", "glm", "text"],
+        default="auto",
+        help="OCR engine: auto-detect (default — text layer for born-digital "
+        "PDFs, GLM vision for scans), 'text' (lossless text-layer extraction), "
+        "or 'glm' (vision transcription)",
+    )
+    parser.add_argument(
+        "--title",
+        help="Book title (skips interactive prompt)",
+    )
     parser.add_argument("--author", help="Author name (skips interactive prompt)")
     parser.add_argument(
         "--auto-toc",
@@ -1982,16 +2142,31 @@ def main():
         print("[!] Error: --auto-toc and --no-toc are mutually exclusive.")
         return
 
-    glm_key, glm_base = resolve_glm_credentials()
-    if not glm_key:
-        print("[!] Error: No GLM API key found.")
-        print("    Set GLM_API_KEY in the environment or .env, or make sure the")
-        print(f"    ZCode coding-plan config exists at {ZCODE_CONFIG_PATH}.")
-        return
-    # An explicit --glm-url always wins; otherwise prefer the base URL
-    # paired with the discovered key.
-    if args.glm_url == GLM_BASE_URL:
-        args.glm_url = glm_base
+    # Engine selection: born-digital PDFs (Word/LaTeX exports) get the
+    # lossless text layer; scans get GLM vision transcription.
+    probe_doc = fitz.open(input_path)
+    text_ratio = detect_text_layer_ratio(probe_doc)
+    probe_doc.close()
+    engine = args.engine
+    if engine == "auto":
+        engine = "text" if text_ratio >= TEXT_ENGINE_MIN_RATIO else "glm"
+    print(
+        f"[*] Engine: {engine}"
+        + (f" (auto-detected, text-layer ratio {text_ratio:.0%})" if args.engine == "auto" else "")
+    )
+
+    glm_key = ""
+    if engine == "glm":
+        glm_key, glm_base = resolve_glm_credentials()
+        if not glm_key:
+            print("[!] Error: No GLM API key found.")
+            print("    Set GLM_API_KEY in the environment or .env, or make sure the")
+            print(f"    ZCode coding-plan config exists at {ZCODE_CONFIG_PATH}.")
+            return
+        # An explicit --glm-url always wins; otherwise prefer the base URL
+        # paired with the discovered key.
+        if args.glm_url == GLM_BASE_URL:
+            args.glm_url = glm_base
 
     if not args.output:
         args.output = os.path.splitext(input_path)[0] + ".epub"
@@ -2030,25 +2205,29 @@ def main():
             input_path, os.path.join(work_dir, "cover.png")
         )
 
-        # Step 2: OCR via GLM vision (resumes from checkpoints)
+        # Step 2: OCR (text-layer extraction or GLM vision; resumes from
+        # checkpoints / results.json)
         results = []
         if pages_range or not os.path.exists(results_file):
             page_start, page_end = pages_range or (1, None)
-            results = run_glm_ocr(
-                input_path,
-                work_dir,
-                glm_key,
-                base_url=args.glm_url,
-                model=args.glm_model,
-                dpi=args.dpi,
-                concurrency=args.concurrency,
-                page_start=page_start,
-                page_end=page_end,
-                max_tokens=args.glm_max_tokens,
-            )
+            if engine == "text":
+                results = run_text_ocr(input_path, work_dir, page_start, page_end)
+            else:
+                results = run_glm_ocr(
+                    input_path,
+                    work_dir,
+                    glm_key,
+                    base_url=args.glm_url,
+                    model=args.glm_model,
+                    dpi=args.dpi,
+                    concurrency=args.concurrency,
+                    page_start=page_start,
+                    page_end=page_end,
+                    max_tokens=args.glm_max_tokens,
+                )
             if results is None:
                 print(
-                    "[!] CRITICAL: GLM OCR did not complete. Aborting "
+                    "[!] CRITICAL: OCR did not complete. Aborting "
                     "(page checkpoints are kept; re-run to resume)."
                 )
                 sys.exit(1)
