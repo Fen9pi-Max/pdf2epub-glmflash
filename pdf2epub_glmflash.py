@@ -87,6 +87,9 @@ WATERMARK_LINE_RE = re.compile(
 # "…Archive" phrase so real names like "Anna" in acknowledgements survive).
 ARCHIVE_BANNER_RE = re.compile(r"Annas?\W{0,3}s?\s*Archive", re.I)
 
+# pdfFactory trial banner overlaying every page of some scans.
+PDFFACTORY_RE = re.compile(r"pdfFactory|fineprint\.com\.cn", re.I)
+
 GLM_PAGE_PROMPT = """你是专业的图书数字化录入员。请将这张书籍页面（全书第 {page_no}/{total_pages} 页）逐字转录为 Markdown。
 
 【转录规则】
@@ -97,15 +100,16 @@ GLM_PAGE_PROMPT = """你是专业的图书数字化录入员。请将这张书�
    - 章节级标题（如「HACK #12 ……」「第3章 ……」）用「## 」；
    - 小节标题用「### 」。
 4. 代码、命令、终端会话输出一律用 ``` 围栏代码块原样保留（保留缩进和空行）；行内代码/命令用反引号。
-5. 列表用 Markdown 列表语法；表格用 Markdown 表格。
-6. 每个自然段输出为一行（段内不要手动换行），段落之间空一行；中文段首不要加全角或半角空格缩进。
-7. 丢弃：页眉（页顶的书名/章名/页码行）、页脚、独立成行的页码、页面边缘的网站水印以及扫描噪点；双联页中间的书缝阴影不算内容。
-8. 正文中的脚注编号（如 注1、[1]）保持原样；当页的脚注文字以单独段落「[注1] ……」的形式放在该页转录结果的最后。
-9. 加框的提示/注意事项（TIP/注意/NOTE 等）用 Markdown 引用块（> ）转录。
-10. 插图、照片、图表在其位置输出一行「[插图：简要描述内容]」，原有图注文字正常转录。
-11. 若整页空白或仅有装饰，只输出「<!-- blank page -->」。
-12. 直接以正文内容开头，不要输出任何解释、评论或与转录无关的内容。
-13. 颜色同步：正文中以明显不同颜色印刷的文字（整句或短语，如蓝色/青色/红色的强调句），用「==[色]文字==」包裹，色为下列颜色名之一：蓝/青/绿/红/橙/紫/粉/棕/黄/灰（如「==[蓝]这句话是蓝色的==」）。仅当颜色与正文墨色差异明显时才标记，不要猜测；加粗、斜体不在此列，仍用 Markdown 语法；代码块内不要使用。"""
+5. 数学公式用 LaTeX 转录：行内公式用 $…$ 包裹，独立成行的公式用 $$…$$，尽量保持符号、上下标、希腊字母与原文一致；不要把公式改写成文字描述。
+7. 列表用 Markdown 列表语法；表格用 Markdown 表格。
+7. 每个自然段输出为一行（段内不要手动换行），段落之间空一行；中文段首不要加全角或半角空格缩进。
+8. 丢弃：页眉（页顶的书名/章名/页码行）、页脚、独立成行的页码、页面边缘的网站水印以及扫描噪点；双联页中间的书缝阴影不算内容。
+9. 正文中的脚注编号（如 注1、[1]）保持原样；当页的脚注文字以单独段落「[注1] ……」的形式放在该页转录结果的最后。
+10. 加框的提示/注意事项（TIP/注意/NOTE 等）用 Markdown 引用块（> ）转录。
+11. 插图、照片、图表在其位置输出一行「[插图：简要描述内容]」，原有图注文字正常转录。
+12. 若整页空白或仅有装饰，只输出「<!-- blank page -->」。
+13. 直接以正文内容开头，不要输出任何解释、评论或与转录无关的内容。
+14. 颜色同步：正文中以明显不同颜色印刷的文字（整句或短语，如蓝色/青色/红色的强调句），用「==[色]文字==」包裹，色为下列颜色名之一：蓝/青/绿/红/橙/紫/粉/棕/黄/灰（如「==[蓝]这句话是蓝色的==」）。仅当颜色与正文墨色差异明显时才标记，不要猜测；加粗、斜体不在此列，仍用 Markdown 语法；代码块内不要使用。"""
 
 
 GLM_FIGURE_PROMPT = """找出这张书籍页面中的所有插图区域（流程图、示意图、原理图、照片、屏幕截图、带边框的图表、思维导图、手写签名、印章/题字），并输出它们的位置。
@@ -189,6 +193,8 @@ def postprocess_glm_markdown(md: str) -> str:
             continue
         if ARCHIVE_BANNER_RE.search(stripped):
             continue
+        if PDFFACTORY_RE.search(stripped):
+            continue
         if re.fullmatch(r"\d{1,4}", stripped):
             continue
         # Lone roman numerals are front-matter page numbers (text-layer PDFs).
@@ -198,6 +204,8 @@ def postprocess_glm_markdown(md: str) -> str:
             continue
         cleaned_lines.append(line)
     cleaned = "\n".join(cleaned_lines)
+    # Normalize model footnote markers (^[注1]) to the prompt's [注1] form.
+    cleaned = cleaned.replace("^[注", "[注")
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
     return cleaned.strip()
 
@@ -1028,8 +1036,10 @@ def extract_printed_toc(results: List[Dict]) -> Optional[List[Dict]]:
     toc_block_ids = set()
     contents_pages = set()
 
-    # 1. Search first 25 pages for printed Contents / Table of Contents / 目录 or dense page-number listings
-    for p_idx, r in enumerate(results[:25]):
+    # 1. Search the front matter (first 40 pages — combined volumes can have
+    #    long TOCs) for printed Contents / Table of Contents / 目录 or dense
+    #    page-number listings
+    for p_idx, r in enumerate(results[:40]):
         for res_idx, res in enumerate(r.get("result", {}).get("layoutParsingResults", [])):
             md = res["markdown"]["text"]
             lines = [l.strip() for l in md.split("\n") if l.strip()]
@@ -1159,6 +1169,20 @@ def extract_printed_toc(results: List[Dict]) -> Optional[List[Dict]]:
                 e["is_major"] = False
                 e["level"] = 2
 
+    # Titles repeated many times in one TOC (e.g. per-chapter 参考文献) are
+    # section templates, not chapters: demote them, and treat them as
+    # "generic" during body matching (windowed search — a generic title can
+    # otherwise grab a far-away occurrence and poison the sequential cursor
+    # for every entry after it).
+    title_counts = Counter(normalize_title(e["title"]) for e in toc_entries)
+    repeated_generic = {
+        t for t, c in title_counts.items() if c >= 3 and t
+    }
+    for e in toc_entries:
+        if e["is_major"] and normalize_title(e["title"]) in repeated_generic:
+            e["is_major"] = False
+            e["level"] = 2
+
     # 2. Match each entry to body pages
     matched = []
     start_search_page = min(contents_pages) if contents_pages else 0
@@ -1181,7 +1205,12 @@ def extract_printed_toc(results: List[Dict]) -> Optional[List[Dict]]:
         )
 
         search_start = max(start_search_page, last_page - 1)
-        for p_idx in range(search_start, len(results)):
+        search_limit = len(results)
+        if normalize_title(entry["title"]) in repeated_generic:
+            # Generic repeated titles must match nearby; a distant hit would
+            # poison the sequential cursor for the entries that follow.
+            search_limit = min(len(results), search_start + 80)
+        for p_idx in range(search_start, search_limit):
             found_strong_header = False
             for res_idx, res in enumerate(
                 results[p_idx].get("result", {}).get("layoutParsingResults", [])
@@ -1198,9 +1227,15 @@ def extract_printed_toc(results: List[Dict]) -> Optional[List[Dict]]:
 
                 # On listing pages (index, TOC continuation) only header lines
                 # are trustworthy anchors; the dense page-number lines would
-                # falsely match almost any entry.
+                # falsely match almost any entry. Short lines stay too — a
+                # bare section heading like 参考文献 lives on citation-dense
+                # pages and must remain visible as an anchor.
                 if is_listing_page(lines):
-                    lines = [l for l in lines if l.strip().startswith("#")]
+                    lines = [
+                        l
+                        for l in lines
+                        if l.strip().startswith("#") or len(l.strip()) <= 8
+                    ]
                     if not lines:
                         continue
 
@@ -1261,7 +1296,11 @@ def extract_printed_toc(results: List[Dict]) -> Optional[List[Dict]]:
                 break
 
         if best_page > 0 and best_score >= 0.8:
-            last_page = max(last_page, best_page)
+            # Repeated-generic titles (per-chapter 参考文献 …) match
+            # unreliably — a wrong hit here must not advance the sequential
+            # cursor past a real chapter start. Only specific titles anchor.
+            if normalize_title(entry["title"]) not in repeated_generic:
+                last_page = max(last_page, best_page)
             matched.append(
                 {
                     "title": entry["title"],
