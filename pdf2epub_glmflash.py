@@ -472,8 +472,20 @@ def embed_page_figures(
             if not crop_page_figure(doc, page_idx, figures[k]["bbox"], out_path):
                 return m.group(0)
         images_map[rel_path] = ""
+        marker_text = m.group(0)
         # Square brackets in the alt text would break ![alt](src) syntax.
-        alt = m.group(0)[1:-1].replace("[", "［").replace("]", "］")
+        if "\n" in marker_text:
+            # Multi-line marker: the model folded the figure's own text
+            # (flowchart box contents, table rows) into the description.
+            # Markdown images cannot span blank lines, so keep only the
+            # first line as the alt and re-emit the rest as body content.
+            first_line, rest = marker_text.split("\n", 1)
+            body = rest.rstrip()
+            if body.endswith("]"):
+                body = body[:-1].rstrip()
+            alt = first_line[1:].replace("[", "［").replace("]", "］")
+            return f"![{alt}]({rel_path})\n\n{body}"
+        alt = marker_text[1:-1].replace("[", "［").replace("]", "］")
         return f"![{alt}]({rel_path})"
 
     new_md = FIGURE_MARKER_RE.sub(_repl, page_md)
@@ -771,6 +783,10 @@ def extract_text_layer_page(
     img_k = 0
     for block in d["blocks"]:
         if block["type"] == 1:  # image block: original bytes, lossless
+            # Word/WPS exports embed every table rule as a tiny image
+            # (e.g. 3108x2 px) — decorative striplines, not figures.
+            if (block.get("height") or 0) <= 4 or (block.get("width") or 0) <= 4:
+                continue
             img_k += 1
             ext = (block.get("ext") or "png").lower()
             ext = "jpg" if ext == "jpeg" else ext
