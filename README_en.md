@@ -8,6 +8,7 @@ Convert scanned PDF books into clean, readable EPUB ebooks with the **GLM-5.3-Fl
 
 ## Features
 
+- **Bilingual output (`--bilingual`)**: English books can be translated paragraph-by-paragraph into Chinese, producing an EPUB with EN paragraph + ZH translation interleaved (translations styled as indented gray quotes; code/formulas/figures stay in English; community-standard terminology; translations are checkpointed and resumable).
 - **Two engines, auto-selected**: born-digital PDFs (Word/LaTeX exports with a text layer) use **lossless text-layer extraction** — zero OCR error, instant, no API calls; scanned PDFs use **GLM-5.3-Flash vision transcription**. Override with `--engine text|glm`.
 - **Vision transcription by GLM-5.3-Flash**: faithful per-page Markdown with heading levels, fenced code blocks, tables, and lists. Running headers, page numbers, and scan watermarks are dropped automatically.
 - **Colored text carried over**: sentences printed in a clearly different ink color (e.g. blue emphasis lines) are detected and re-emitted with inline CSS colors in the EPUB (`==[蓝]…==` markers → `<span style="color:…">`).

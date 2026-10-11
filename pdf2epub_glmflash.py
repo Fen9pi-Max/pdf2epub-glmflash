@@ -786,7 +786,11 @@ def extract_text_layer_page(
         max_size = 0.0
         for line in block.get("lines", []):
             text = "".join(s["text"] for s in line.get("spans", []))
-            if text.strip():
+            # Word-exported PDFs often emit tab-separated words ("For\tfirst\t...")
+            # and stray CR/FF control characters.
+            text = re.sub(r"[\r\f\v]+", "", text)
+            text = re.sub(r"[ \t]+", " ", text).strip()
+            if text:
                 block_lines.append(text)
             for s in line.get("spans", []):
                 if s["text"].strip():
@@ -864,6 +868,239 @@ def run_text_ocr(
         f"{n_imgs} embedded image(s)."
     )
     return results
+
+
+GLM_TRANSLATE_PROMPT = """你是专业的技术书籍翻译。把下面的 Markdown 内容（书籍的一页）翻译成简体中文。
+
+要求：
+1. 保持块结构完全一致：空行分隔的段落/标题/列表/表格/代码块的个数和顺序必须与原文一一对应，不要合并或拆分段落。
+2. 标题也翻译，保持原有的 # 层级和格式。
+3. 代码块（``` 围栏内）原样保留，不翻译；行内代码 `...` 的内容不翻译（包裹它的句子照常翻译）。
+4. LaTeX 公式（$...$ 或 $$...$$）原样保留。
+5. 图片引用 ![...](...) 与 HTML 注释 <!-- ... --> 原样保留。
+6. 表格翻译单元格中的文字，保持 Markdown 表格结构与行列数一致。
+7. 专业术语使用领域驱动设计（DDD）社区通用译法（如 Ubiquitous Language→通用语言、Bounded Context→限界上下文、Context Map→上下文映射图、Entity→实体、Value Object→值对象、Aggregate→聚合、Repository→仓储、Domain Service→领域服务、Domain Event→领域事件、Anti-Corruption Layer→防腐层），首次出现时在译名后用括号附英文原文。
+8. 只输出翻译后的 Markdown，不要任何解释或原文。"""
+
+
+def glm_translate_page(
+    md_en: str,
+    api_key: str,
+    base_url: str = GLM_BASE_URL,
+    model: str = GLM_MODEL,
+    page_no: int = 0,
+    max_tokens: int = 8000,
+    max_retries: int = 5,
+) -> str:
+    """Translates one page of English markdown to Chinese (text-only call)."""
+    body = {
+        "model": model,
+        "max_tokens": max_tokens,
+        "messages": [
+            {"role": "user", "content": GLM_TRANSLATE_PROMPT + "\n\n--- 原文开始 ---\n" + md_en + "\n--- 原文结束 ---"}
+        ],
+    }
+    if GLM_THINKING == "disabled":
+        body["thinking"] = {"type": "disabled"}
+    url = base_url.rstrip("/") + "/v1/messages"
+    headers = {
+        "x-api-key": api_key,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+    }
+    last_err = ""
+    for attempt in range(max_retries):
+        try:
+            resp = requests.post(url, headers=headers, json=body, timeout=300)
+            if resp.status_code != 200:
+                retryable = resp.status_code == 429 or resp.status_code >= 500
+                raise GlmApiError(
+                    "HTTP {}: {}".format(resp.status_code, resp.text[:200]),
+                    retryable=retryable,
+                )
+            data = resp.json()
+            if data.get("stop_reason") == "max_tokens":
+                raise GlmApiError(
+                    "translation truncated (max_tokens)", retryable=False
+                )
+            text = "\n".join(
+                blk.get("text", "")
+                for blk in data.get("content", [])
+                if blk.get("type") == "text"
+            ).strip()
+            if not text:
+                raise GlmApiError("empty response", retryable=True)
+            # strip a possible wrapping fence / 原文回显
+            m = re.search(r"---\s*原文开始\s*---([\s\S]*?)---\s*原文结束\s*---", text)
+            if m:
+                text = m.group(1).strip()
+            if text.startswith("```"):
+                text = re.sub(r"^```[a-zA-Z]*\s*", "", text)
+                text = re.sub(r"\s*```\s*$", "", text)
+            return text
+        except GlmApiError as e:
+            if not e.retryable:
+                raise
+            last_err = str(e)
+        except requests.RequestException as e:
+            last_err = f"network error: {e}"
+        if attempt < max_retries - 1:
+            wait = min(60.0, (2 ** attempt) * 3) + random.uniform(0, 2)
+            print(
+                f"    [!] Translate page {page_no}: {last_err}; retrying in {wait:.0f}s"
+            )
+            time.sleep(wait)
+    raise GlmApiError(f"translate giving up after {max_retries}: {last_err}")
+
+
+def _demote_zh_heading(line: str) -> str:
+    m = re.match(r"^(#{1,6})\s+(.+)$", line.strip())
+    return f"**{m.group(2).strip()}**" if m else line
+
+
+def _clean_zh_block(b: str) -> Optional[str]:
+    """Chinese block after dropping comments/images; None if nothing remains.
+    Code blocks are dropped entirely (they stay English-only)."""
+    lines = [
+        l for l in b.split("\n")
+        if not l.strip().startswith("<!--") and not l.strip().startswith("![")
+    ]
+    if not any(l.strip() for l in lines):
+        return None
+    if lines[0].strip().startswith("```"):
+        return None
+    return "\n".join(_demote_zh_heading(l) for l in lines)
+
+
+def _is_en_only_block(b: str) -> bool:
+    """English blocks that have no translated counterpart: code, images,
+    comments."""
+    first = next((l for l in b.split("\n") if l.strip()), "")
+    t = first.strip()
+    return t.startswith("```") or t.startswith("![") or t.startswith("<!--")
+
+
+def merge_bilingual_blocks(md_en: str, md_zh: str) -> str:
+    """
+    Interleaves English blocks with their Chinese translations (blockquote-
+    styled). Code blocks, images, and comments stay English-only; Chinese
+    headings are demoted to bold so they cannot pollute TOC detection.
+    """
+    en_blocks = [b.strip() for b in re.split(r"\n\s*\n", md_en) if b.strip()]
+    zh_blocks = [
+        _clean_zh_block(b)
+        for b in (x.strip() for x in re.split(r"\n\s*\n", md_zh) if x.strip())
+    ]
+    zh_blocks = [b for b in zh_blocks if b is not None]
+
+    en_pairable = [b for b in en_blocks if not _is_en_only_block(b)]
+
+    def quote(b: str) -> str:
+        return "\n".join("> " + l for l in b.split("\n"))
+
+    out = []
+    if len(zh_blocks) == len(en_pairable):
+        zi = 0
+        for en in en_blocks:
+            out.append(en)
+            if not _is_en_only_block(en):
+                out.append(quote(zh_blocks[zi]))
+                zi += 1
+    elif zh_blocks:
+        # Block counts drifted (model merged/split a paragraph): keep the page
+        # readable by emitting all English blocks, then all Chinese blocks.
+        out.extend(en_blocks)
+        out.extend(quote(b) for b in zh_blocks)
+    else:
+        out.extend(en_blocks)
+    return "\n\n".join(out)
+
+
+def build_bilingual_results(
+    results: List[Dict],
+    work_dir: str,
+    api_key: str,
+    base_url: str = GLM_BASE_URL,
+    model: str = GLM_MODEL,
+    concurrency: int = GLM_CONCURRENCY,
+    max_tokens: int = 8000,
+) -> Optional[List[Dict]]:
+    """
+    Bilingual stage: translates every page (checkpointed under glm_trans/)
+    and interleaves EN/ZH blocks. TOC detection must run BEFORE this — the
+    merged pages keep English headings only.
+    """
+    trans_dir = os.path.join(work_dir, "glm_trans")
+    os.makedirs(trans_dir, exist_ok=True)
+    page_count = len(results)
+
+    todo = [
+        i for i in range(page_count)
+        if not os.path.exists(os.path.join(trans_dir, f"page_{i + 1:04d}.md"))
+    ]
+    print(f"[*] Bilingual: translating {len(todo)}/{page_count} page(s) to Chinese...")
+    failed: List[int] = []
+    lock = threading.Lock()
+    done = 0
+
+    def translate_one(i: int):
+        nonlocal done
+        md = results[i]["result"]["layoutParsingResults"][0]["markdown"]["text"]
+        if md.strip() == "<!-- blank page -->" or not md.strip():
+            return
+        out_file = os.path.join(trans_dir, f"page_{i + 1:04d}.md")
+        try:
+            zh = glm_translate_page(
+                md, api_key, base_url=base_url, model=model,
+                page_no=i + 1, max_tokens=max_tokens,
+            )
+            tmp = out_file + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write(zh)
+            os.replace(tmp, out_file)
+        except Exception as e:
+            with lock:
+                failed.append(i + 1)
+                print(f"[!] Translation failed on page {i + 1}: {e}")
+            return
+        with lock:
+            done += 1
+            if done % 10 == 0 or done == len(todo):
+                print(f"    [+] Translated {done}/{len(todo)} pages")
+
+    if todo:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as ex:
+            list(ex.map(translate_one, todo))
+    if failed:
+        print(f"[!] {len(failed)} page(s) failed to translate: {failed}")
+        return None
+
+    merged_results = []
+    for i in range(page_count):
+        md_en = results[i]["result"]["layoutParsingResults"][0]["markdown"]["text"]
+        zh_file = os.path.join(trans_dir, f"page_{i + 1:04d}.md")
+        if os.path.exists(zh_file):
+            with open(zh_file, "r", encoding="utf-8") as f:
+                md_zh = f.read()
+            merged = merge_bilingual_blocks(md_en, md_zh)
+        else:
+            merged = md_en
+        merged_results.append(
+            {
+                "result": {
+                    "layoutParsingResults": [
+                        {
+                            "markdown": {
+                                "text": merged,
+                                "images": results[i]["result"]["layoutParsingResults"][0]["markdown"].get("images", {}),
+                            }
+                        }
+                    ]
+                }
+            }
+        )
+    print(f"[+] Bilingual merge complete ({page_count} pages).")
+    return merged_results
 
 
 def extract_cover_image(pdf_path: str, output_path: str) -> Optional[str]:
@@ -1763,7 +2000,7 @@ def create_epub(
     h2 { margin: 1.2em 0 0.6em 0; font-size: 1.3em; }
     h3 { margin: 1em 0 0.5em 0; font-size: 1.1em; }
     p { margin-bottom: 0.8em; text-indent: 0; }
-    blockquote { margin: 1em 2em; font-style: italic; }
+    blockquote { margin: 0.5em 1.2em; padding: 0.1em 0 0.1em 0.8em; border-left: 3px solid #c0c0c0; color: #444; font-style: normal; }
     pre { background-color: #f4f4f4; padding: 0.6em; white-space: pre-wrap; word-break: break-all; font-size: 0.85em; }
     code { font-family: monospace; font-size: 0.9em; }
     img { max-width: 100%; height: auto; display: block; margin: 1em auto; }
@@ -2170,6 +2407,12 @@ def main():
         "--language",
         help="EPUB language code, e.g. zh / en (default: auto-detect from content)",
     )
+    parser.add_argument(
+        "--bilingual",
+        action="store_true",
+        help="Translate English content to Chinese and emit EN/ZH parallel "
+        "blocks (translation runs after TOC detection; requires GLM API)",
+    )
     args = parser.parse_args()
 
     input_path = args.input_pdf
@@ -2195,13 +2438,14 @@ def main():
     )
 
     glm_key = ""
-    if engine == "glm":
+    if engine == "glm" or args.bilingual:
         glm_key, glm_base = resolve_glm_credentials()
-        if not glm_key:
-            print("[!] Error: No GLM API key found.")
-            print("    Set GLM_API_KEY in the environment or .env, or make sure the")
-            print(f"    ZCode coding-plan config exists at {ZCODE_CONFIG_PATH}.")
-            return
+    if (engine == "glm" or args.bilingual) and not glm_key:
+        print("[!] Error: No GLM API key found.")
+        print("    Set GLM_API_KEY in the environment or .env, or make sure the")
+        print(f"    ZCode coding-plan config exists at {ZCODE_CONFIG_PATH}.")
+        return
+    if glm_key:
         # An explicit --glm-url always wins; otherwise prefer the base URL
         # paired with the discovered key.
         if args.glm_url == GLM_BASE_URL:
@@ -2301,11 +2545,29 @@ def main():
                 major_h, all_h, source=src
             )
 
+        # Step 2.95: Bilingual translation (EN -> ZH parallel blocks).
+        # Runs AFTER TOC detection so chapter matching sees pure English.
+        build_results = results
+        if args.bilingual:
+            build_results = build_bilingual_results(
+                results,
+                work_dir,
+                glm_key,
+                base_url=args.glm_url,
+                model=args.glm_model,
+                concurrency=args.concurrency,
+                max_tokens=args.glm_max_tokens,
+            )
+            if build_results is None:
+                print("[!] CRITICAL: bilingual translation incomplete. Aborting "
+                      "(translation checkpoints kept; re-run to resume).")
+                sys.exit(1)
+
         # Step 3: Generation
         print("[-] Generating EPUB...")
         create_epub(
             metadata["title"],
-            results,
+            build_results,
             args.output,
             image_dir,
             cover_image_path=cover_path,
