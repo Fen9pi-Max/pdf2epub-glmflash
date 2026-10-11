@@ -958,9 +958,10 @@ def _demote_zh_heading(line: str) -> str:
     return f"**{m.group(2).strip()}**" if m else line
 
 
-def _clean_zh_block(b: str) -> Optional[str]:
+def _clean_zh_block(b: str, demote_headings: bool = True) -> Optional[str]:
     """Chinese block after dropping comments/images; None if nothing remains.
-    Code blocks are dropped entirely (they stay English-only)."""
+    Code blocks are dropped entirely (they stay English-only). In bilingual
+    mode headings are demoted to bold; Chinese-only mode keeps them."""
     lines = [
         l for l in b.split("\n")
         if not l.strip().startswith("<!--") and not l.strip().startswith("![")
@@ -969,7 +970,9 @@ def _clean_zh_block(b: str) -> Optional[str]:
         return None
     if lines[0].strip().startswith("```"):
         return None
-    return "\n".join(_demote_zh_heading(l) for l in lines)
+    if demote_headings:
+        lines = [_demote_zh_heading(l) for l in lines]
+    return "\n".join(lines)
 
 
 def _is_en_only_block(b: str) -> bool:
@@ -1016,7 +1019,38 @@ def merge_bilingual_blocks(md_en: str, md_zh: str) -> str:
     return "\n\n".join(out)
 
 
-def build_bilingual_results(
+def build_chinese_blocks(md_en: str, md_zh: str) -> str:
+    """
+    Chinese-only page: walks the EN blocks in order; translatable blocks are
+    replaced by their Chinese translations (headings keep their # level so
+    TOC detection works), EN-only blocks (code/images/comments) stay as-is
+    so figures are not lost.
+    """
+    en_blocks = [b.strip() for b in re.split(r"\n\s*\n", md_en) if b.strip()]
+    zh_blocks = [
+        _clean_zh_block(b, demote_headings=False)
+        for b in (x.strip() for x in re.split(r"\n\s*\n", md_zh) if x.strip())
+    ]
+    zh_blocks = [b for b in zh_blocks if b is not None]
+    en_only = [b for b in en_blocks if _is_en_only_block(b)]
+
+    out = []
+    if len(zh_blocks) == len([b for b in en_blocks if not _is_en_only_block(b)]):
+        zi = 0
+        for en in en_blocks:
+            if _is_en_only_block(en):
+                out.append(en)
+            else:
+                out.append(zh_blocks[zi])
+                zi += 1
+    else:
+        # Drifted counts: ZH blocks first, then append EN-only figures.
+        out.extend(zh_blocks)
+        out.extend(en_only)
+    return "\n\n".join(out)
+
+
+def build_translated_results(
     results: List[Dict],
     work_dir: str,
     api_key: str,
@@ -1024,6 +1058,7 @@ def build_bilingual_results(
     model: str = GLM_MODEL,
     concurrency: int = GLM_CONCURRENCY,
     max_tokens: int = 8000,
+    bilingual: bool = True,
 ) -> Optional[List[Dict]]:
     """
     Bilingual stage: translates every page (checkpointed under glm_trans/)
@@ -1038,7 +1073,8 @@ def build_bilingual_results(
         i for i in range(page_count)
         if not os.path.exists(os.path.join(trans_dir, f"page_{i + 1:04d}.md"))
     ]
-    print(f"[*] Bilingual: translating {len(todo)}/{page_count} page(s) to Chinese...")
+    label = "Bilingual" if bilingual else "Chinese"
+    print(f"[*] {label}: translating {len(todo)}/{page_count} page(s) to Chinese...")
     failed: List[int] = []
     lock = threading.Lock()
     done = 0
@@ -1082,7 +1118,11 @@ def build_bilingual_results(
         if os.path.exists(zh_file):
             with open(zh_file, "r", encoding="utf-8") as f:
                 md_zh = f.read()
-            merged = merge_bilingual_blocks(md_en, md_zh)
+            merged = (
+                merge_bilingual_blocks(md_en, md_zh)
+                if bilingual
+                else build_chinese_blocks(md_en, md_zh)
+            )
         else:
             merged = md_en
         merged_results.append(
@@ -1099,7 +1139,7 @@ def build_bilingual_results(
                 }
             }
         )
-    print(f"[+] Bilingual merge complete ({page_count} pages).")
+    print(f"[+] Translation merge complete ({page_count} pages, {'EN/ZH' if bilingual else 'ZH-only'}).")
     return merged_results
 
 
@@ -1121,6 +1161,40 @@ def extract_cover_image(pdf_path: str, output_path: str) -> Optional[str]:
         return None
     finally:
         doc.close()
+
+
+def anchor_chinese_headings(
+    en_results: List[Dict], zh_results: List[Dict]
+) -> List[Dict]:
+    """
+    Chinese-only books: chapter boundaries anchored by the (reliable) English
+    TOC engine, chapter titles taken from the Chinese heading on each start
+    page. Translation numbering drift (一、/I./五、 mixed) makes pure-Chinese
+    TOC matching unreliable.
+    """
+    en_major, _, _ = detect_chapter_headings(en_results)
+    confirmed = []
+    for h in en_major:
+        pg = max(1, min(h["page"], len(zh_results)))
+        zh_md = zh_results[pg - 1]["result"]["layoutParsingResults"][0][
+            "markdown"
+        ]["text"]
+        title = None
+        for line in zh_md.split("\n"):
+            m = re.match(r"^#\s+(.+)$", line.strip())
+            if m and len(m.group(1).strip()) >= 2:
+                title = m.group(1).strip()
+                break
+        confirmed.append(
+            {
+                "title": title or h["title"],
+                "page": pg,
+                "level": h.get("level", 1),
+                "is_major": True,
+                "matched_text": None,
+            }
+        )
+    return confirmed
 
 
 def extract_metadata_interactive(
@@ -2408,6 +2482,12 @@ def main():
         help="EPUB language code, e.g. zh / en (default: auto-detect from content)",
     )
     parser.add_argument(
+        "--chinese",
+        action="store_true",
+        help="Translate the book to Chinese and emit a Chinese-only EPUB "
+        "(code/figures stay as-is; chapter detection runs on the Chinese text)",
+    )
+    parser.add_argument(
         "--bilingual",
         action="store_true",
         help="Translate English content to Chinese and emit EN/ZH parallel "
@@ -2422,6 +2502,9 @@ def main():
 
     if args.auto_toc and args.no_toc:
         print("[!] Error: --auto-toc and --no-toc are mutually exclusive.")
+        return
+    if args.bilingual and args.chinese:
+        print("[!] Error: --bilingual and --chinese are mutually exclusive.")
         return
 
     # Engine selection: born-digital PDFs (Word/LaTeX exports) get the
@@ -2438,9 +2521,9 @@ def main():
     )
 
     glm_key = ""
-    if engine == "glm" or args.bilingual:
+    if engine == "glm" or args.bilingual or args.chinese:
         glm_key, glm_base = resolve_glm_credentials()
-    if (engine == "glm" or args.bilingual) and not glm_key:
+    if (engine == "glm" or args.bilingual or args.chinese) and not glm_key:
         print("[!] Error: No GLM API key found.")
         print("    Set GLM_API_KEY in the environment or .env, or make sure the")
         print(f"    ZCode coding-plan config exists at {ZCODE_CONFIG_PATH}.")
@@ -2523,6 +2606,26 @@ def main():
             with open(results_file, "r", encoding="utf-8") as f:
                 results = json.load(f)
 
+        # Step 2.4: Chinese-only translation must run BEFORE TOC detection
+        # (chapter matching needs the Chinese headings).
+        if args.chinese:
+            zh_results = build_translated_results(
+                results,
+                work_dir,
+                glm_key,
+                base_url=args.glm_url,
+                model=args.glm_model,
+                concurrency=args.concurrency,
+                max_tokens=args.glm_max_tokens,
+                bilingual=False,
+            )
+            if zh_results is None:
+                print("[!] CRITICAL: Chinese translation incomplete. Aborting "
+                      "(checkpoints kept; re-run to resume).")
+                sys.exit(1)
+            en_results_for_toc = results
+            results = zh_results
+
         # Step 2.5: Metadata extraction
         default_title = os.path.splitext(os.path.basename(input_path))[0]
         if args.title:
@@ -2534,8 +2637,19 @@ def main():
         if args.no_toc:
             confirmed_headings = []
         elif args.auto_toc:
-            major_h, all_h, _ = detect_chapter_headings(results, metadata.get("title"))
-            confirmed_headings = major_h
+            if args.chinese:
+                confirmed_headings = anchor_chinese_headings(
+                    en_results_for_toc, results
+                )
+                print(
+                    f"[*] Chinese chapters anchored from English TOC engine: "
+                    f"{len(confirmed_headings)}"
+                )
+            else:
+                major_h, all_h, _ = detect_chapter_headings(
+                    results, metadata.get("title")
+                )
+                confirmed_headings = major_h
         else:
             print("[-] Step 2.75: Detecting chapter headings...")
             major_h, all_h, src = detect_chapter_headings(
@@ -2549,7 +2663,7 @@ def main():
         # Runs AFTER TOC detection so chapter matching sees pure English.
         build_results = results
         if args.bilingual:
-            build_results = build_bilingual_results(
+            build_results = build_translated_results(
                 results,
                 work_dir,
                 glm_key,
