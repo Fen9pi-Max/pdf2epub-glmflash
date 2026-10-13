@@ -1950,9 +1950,15 @@ def sanitize_markdown_for_xhtml(lines: List[str]) -> List[str]:
     spans. Text like disassembly annotations ("8048427 <main+0x5b>") would
     otherwise be passed through by python-markdown as raw HTML, producing
     invalid XHTML (and mangling the text with bogus closing tags).
+
+    Also shields square brackets inside $...$ math from the markdown link
+    parser: LaTeX scalar notation like $[u](-P)$ is otherwise converted to
+    <a href="-P">u</a> (epubcheck RSC-007: referenced resource not found).
+    Escaped brackets render as literal [ ] so the math reads unchanged.
     """
     out = []
     in_code = False
+    in_math = False
     for line in lines:
         if line.strip().startswith("```"):
             in_code = not in_code
@@ -1965,6 +1971,22 @@ def sanitize_markdown_for_xhtml(lines: List[str]) -> List[str]:
         # as a space instead of literal escaped text.
         if re.search(r"<br\s*/?>", line, re.I):
             line = re.sub(r"<br\s*/?>", " ", line, flags=re.I)
+
+        def _shield(seg: str) -> str:
+            if in_math:
+                return seg.replace("[", "\\[").replace("]", "\\]")
+            return re.sub(
+                r"\$[^$\n]+\$",
+                lambda m: m.group(0).replace("[", "\\[").replace("]", "\\]"),
+                seg,
+            )
+
+        parts = line.split("`")
+        for i in range(0, len(parts), 2):
+            parts[i] = _shield(parts[i])
+        line = "`".join(parts)
+        if "$$" in line and line.count("$$") % 2 == 1:
+            in_math = not in_math
         if "<" in line:
             # Even-indexed segments of a backtick split are outside inline
             # code spans.
@@ -2043,15 +2065,45 @@ def render_color_spans(lines: List[str]) -> List[str]:
 
 
 def balance_code_fences(md: str) -> str:
-    """Appends a closing fence when a page's markdown ends inside a code
-    block, so the unclosed fence cannot swallow following pages' content."""
+    """Normalizes ``` fence lines and appends a closing fence when a page's
+    markdown ends inside a code block, so an unclosed fence cannot swallow
+    following pages' content.
+
+    The model occasionally glues the first code line onto the opener
+    ("```core_collector makedumpfile -c -d 17"). python-markdown rejects
+    multi-word info strings, so such a fence silently fails to open and
+    flips the open/close state of every later fence in the chapter. Split
+    those lines; single-word language tags ("```c") stay attached.
+    """
+    out_lines = []
     in_code = False
     for l in md.split("\n"):
-        if l.strip().startswith("```"):
+        stripped = l.lstrip()
+        if stripped.startswith("```"):
+            n = 3
+            while n < len(stripped) and stripped[n] == "`":
+                n += 1
+            rest = stripped[n:].strip()
+            if in_code or not rest or re.fullmatch(r"[\w#+.-]+", rest):
+                out_lines.append(l)
+            else:
+                out_lines.append("```")
+                out_lines.append(stripped[n:])
             in_code = not in_code
+        else:
+            out_lines.append(l)
     if in_code:
-        md = md.rstrip("\n") + "\n```\n"
-    return md
+        out_lines.append("```")
+    return "\n".join(out_lines)
+
+
+def _fences_balanced(lines: List[str]) -> bool:
+    """True when the ``` fence lines in lines pair up (even count)."""
+    n = 0
+    for l in lines:
+        if l.lstrip().startswith("```"):
+            n += 1
+    return n % 2 == 0
 
 
 def create_epub(
@@ -2112,6 +2164,9 @@ def create_epub(
         for i, page_res in enumerate(layout_results):
             global_page_counter += 1
             page_md = page_res["markdown"]["text"]
+            # results.json may come from runs older than the fence
+            # normalizer; re-running it here is idempotent.
+            page_md = balance_code_fences(page_md)
             images_map = page_res["markdown"].get("images", {})
 
             for rel_path, img_url in images_map.items():
@@ -2268,6 +2323,7 @@ def create_epub(
     chapter_count = 0
     next_heading_idx = 0
     current_page = 0
+    in_fence = False
 
     major_header_pattern = re.compile(
         r"^(#{1,3})\s+(?:Chapter|Part|Lecture|Preface|Intro|Appendix|Prologue|Epilogue|Conclusion|Book|Acknowledgements|Contents|Abstract|HACK\s*#?\s*\d+|序|前言|导论|目录|第\s*[零一二三四五六七八九十百千0-9]+\s*[篇章讲]|第\s*[零一二三四五六七八九十百千0-9]+\s*部分).*"
@@ -2280,6 +2336,14 @@ def create_epub(
             if m_pg:
                 current_page = int(m_pg.group(1))
             continue
+
+        # Fence state BEFORE consuming this line: a heading match inside a
+        # fenced code block is a false positive (echoed TOC line, comment),
+        # and splitting there would cut the block in half — the unclosed
+        # fence then swallows the rest of the chapter as code.
+        was_in_fence = in_fence
+        if line.lstrip().startswith("```"):
+            in_fence = not in_fence
 
         match = any_header_pattern.match(line)
         is_split_point = False
@@ -2311,23 +2375,22 @@ def create_epub(
         line = re.sub(r"\$\s*\^\{(.+?)\}\s*\$", r"", line)
         line = re.sub(r"\$\s*\\underline\{(.+?)\}\s*\$", "", line)
 
+        if is_split_point and was_in_fence:
+            is_split_point = False
+
         if is_split_point:
             # Check if previous chapter has meaningful content before saving
             content_text = "".join(current_chapter_content).strip()
             if current_chapter_content and len(content_text) > 30:
-                safe_title = "".join(
-                    [
-                        c
-                        for c in current_chapter_title
-                        if c.isalnum() or c in (" ", "_", "-")
-                    ]
-                ).strip()
-                if not safe_title:
-                    safe_title = f"chap_{chapter_count}"
-
+                # Safety net: a chapter must never end inside an open fence.
+                if not _fences_balanced(current_chapter_content):
+                    current_chapter_content.append("```")
                 c = epub.EpubHtml(
                     title=current_chapter_title,
-                    file_name=f"{safe_title}_{chapter_count}.xhtml",
+                    # ASCII-only file names: hrefs with spaces/CJK are
+                    # invalid URLs (epubcheck RSC-020) and strict readers
+                    # like Apple Books refuse to resolve them.
+                    file_name=f"chap_{chapter_count:04d}.xhtml",
                     lang=language,
                 )
 
@@ -2364,15 +2427,11 @@ def create_epub(
 
     # Add last chapter
     if current_chapter_content:
-        safe_title = "".join(
-            [c for c in current_chapter_title if c.isalnum() or c in (" ", "_", "-")]
-        ).strip()
-        if not safe_title:
-            safe_title = f"chap_{chapter_count}"
-
+        if not _fences_balanced(current_chapter_content):
+            current_chapter_content.append("```")
         c = epub.EpubHtml(
             title=current_chapter_title,
-            file_name=f"{safe_title}_{chapter_count}.xhtml",
+            file_name=f"chap_{chapter_count:04d}.xhtml",
             lang=language,
         )
         try:
